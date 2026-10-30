@@ -57,26 +57,34 @@ func cmdKeygen(args []string) int {
 	identity := plugin.EncodeIdentity(pluginName, d.encode())
 
 	w := io.Writer(os.Stdout)
+	var f *os.File
 	if *out != "" {
-		f, err := os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		f, err = os.OpenFile(*out, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			return fatalf("%v", err)
 		}
 		defer f.Close()
 		w = f
 	}
-	fmt.Fprintf(w, "# created: %s\n", time.Now().Format(time.RFC3339))
-	fmt.Fprintf(w, "# ssh key: %s %s\n", ssh.FingerprintSHA256(key), keyComment(ag, key))
-	fmt.Fprintf(w, "# public key: %s\n", recipient)
-	fmt.Fprintf(w, "%s\n", identity)
-	fmt.Fprintf(os.Stderr, "Public key: %s\n", recipient)
+	if _, err := fmt.Fprintf(w, "# created: %s\n# ssh key: %s %q\n# public key: %s\n%s\n",
+		time.Now().Format(time.RFC3339), ssh.FingerprintSHA256(key), key.Comment, recipient, identity); err != nil {
+		return fatalf("writing identity: %v", err)
+	}
+	if f != nil {
+		if err := f.Close(); err != nil {
+			return fatalf("closing identity file: %v", err)
+		}
+	}
+	if _, err := fmt.Fprintf(os.Stderr, "Public key: %s\n", recipient); err != nil {
+		return fatalf("writing public key: %v", err)
+	}
 	return 0
 }
 
 // pickKey selects an ssh-ed25519 key from the agent. With an empty selector
 // the agent must hold exactly one eligible key; otherwise the selector is
 // matched as a substring of the key's comment or SHA256 fingerprint.
-func pickKey(ag agent.Agent, selector string) (ssh.PublicKey, error) {
+func pickKey(ag agent.Agent, selector string) (*agent.Key, error) {
 	keys, err := ag.List()
 	if err != nil {
 		return nil, fmt.Errorf("cannot list ssh agent keys: %v", err)
@@ -109,24 +117,10 @@ func pickKey(ag agent.Agent, selector string) (ssh.PublicKey, error) {
 	default:
 		var lines []string
 		for _, k := range eligible {
-			lines = append(lines, fmt.Sprintf("  %s %s", ssh.FingerprintSHA256(k), k.Comment))
+			lines = append(lines, fmt.Sprintf("  %s %q", ssh.FingerprintSHA256(k), k.Comment))
 		}
 		return nil, fmt.Errorf("multiple ssh-ed25519 keys match; pick one with -k:\n%s", strings.Join(lines, "\n"))
 	}
-}
-
-func keyComment(ag agent.Agent, key ssh.PublicKey) string {
-	keys, err := ag.List()
-	if err != nil {
-		return ""
-	}
-	marshaled := key.Marshal()
-	for _, k := range keys {
-		if string(k.Marshal()) == string(marshaled) {
-			return k.Comment
-		}
-	}
-	return ""
 }
 
 func cmdList(args []string) int {
@@ -142,7 +136,9 @@ func cmdList(args []string) int {
 		return fatalf("cannot list ssh agent keys: %v", err)
 	}
 	if len(keys) == 0 {
-		fmt.Println("(the ssh agent holds no keys)")
+		if _, err := fmt.Println("(the ssh agent holds no keys)"); err != nil {
+			return fatalf("listing keys: %v", err)
+		}
 		return 0
 	}
 	for _, k := range keys {
@@ -150,7 +146,9 @@ func cmdList(args []string) int {
 		if k.Type() == ssh.KeyAlgoED25519 {
 			eligible = "eligible"
 		}
-		fmt.Printf("%s %s %s [%s]\n", k.Type(), ssh.FingerprintSHA256(k), k.Comment, eligible)
+		if _, err := fmt.Printf("%s %s %q [%s]\n", k.Type(), ssh.FingerprintSHA256(k), k.Comment, eligible); err != nil {
+			return fatalf("listing keys: %v", err)
+		}
 	}
 	return 0
 }
@@ -188,7 +186,9 @@ func cmdRecipient(args []string) int {
 		if err != nil {
 			return fatalf("%v", err)
 		}
-		fmt.Println(id.Recipient().String())
+		if _, err := fmt.Println(id.Recipient().String()); err != nil {
+			return fatalf("writing public key: %v", err)
+		}
 		found = true
 	}
 	if err := scanner.Err(); err != nil {
