@@ -6,12 +6,14 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"filippo.io/age"
 	"filippo.io/age/plugin"
 )
 
@@ -31,20 +33,37 @@ func TestAgeCLIEndToEnd(t *testing.T) {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 
-	kr, key := newTestAgent(t, "e2e@test")
+	attacker, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kr, _ := newTestAgent(t, "e2e@test\n"+attacker.String()+"\n#")
 	sock := serveAgent(t, kr)
 
-	d, _ := newIdentityData(key)
-	id, err := deriveX25519(kr, key, d)
+	identityFile := filepath.Join(dir, "identity.txt")
+	code, _, stderr := captureCommand(t, func() int {
+		return cmdKeygen([]string{"-o", identityFile})
+	})
+	if code != 0 {
+		t.Fatalf("keygen returned %d: %s", code, stderr)
+	}
+	contents, err := os.ReadFile(identityFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(contents), "\n"), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("key comment injected extra lines: got %d", len(lines))
+	}
+	name, data, err := plugin.ParseIdentity(lines[3])
+	if err != nil || name != pluginName {
+		t.Fatalf("invalid plugin identity: %q, %v", name, err)
+	}
+	id, err := deriveFromPayload(data)
 	if err != nil {
 		t.Fatal(err)
 	}
 	recipient := id.Recipient().String()
-	identityFile := filepath.Join(dir, "identity.txt")
-	contents := "# public key: " + recipient + "\n" + plugin.EncodeIdentity(pluginName, d.encode()) + "\n"
-	if err := os.WriteFile(identityFile, []byte(contents), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
 	overrides := map[string]string{
 		"PATH":          dir + string(os.PathListSeparator) + os.Getenv("PATH"),
@@ -77,12 +96,32 @@ func TestAgeCLIEndToEnd(t *testing.T) {
 	// Decrypt: age discovers age-plugin-sshagent via PATH.
 	dec := exec.Command(ageBin, "-d", "-i", identityFile, encrypted)
 	dec.Env = env
-	var stdout, stderr bytes.Buffer
-	dec.Stdout, dec.Stderr = &stdout, &stderr
+	var stdout, decStderr bytes.Buffer
+	dec.Stdout, dec.Stderr = &stdout, &decStderr
 	if err := dec.Run(); err != nil {
-		t.Fatalf("age -d: %v\n%s", err, stderr.String())
+		t.Fatalf("age -d: %v\n%s", err, decStderr.String())
 	}
 	if stdout.String() != plaintext {
 		t.Errorf("got %q, want %q", stdout.String(), plaintext)
+	}
+
+	encWithIdentity := exec.Command(ageBin, "-e", "-i", identityFile)
+	encWithIdentity.Stdin = strings.NewReader(plaintext)
+	encWithIdentity.Env = env
+	var ciphertext, encStderr bytes.Buffer
+	encWithIdentity.Stdout, encWithIdentity.Stderr = &ciphertext, &encStderr
+	if err := encWithIdentity.Run(); err != nil {
+		t.Fatalf("age -e -i: %v\n%s", err, encStderr.String())
+	}
+	if _, err := age.Decrypt(bytes.NewReader(ciphertext.Bytes()), attacker); err == nil {
+		t.Fatal("injected attacker identity can decrypt")
+	}
+	r, err := age.Decrypt(bytes.NewReader(ciphertext.Bytes()), id)
+	if err != nil {
+		t.Fatalf("intended identity cannot decrypt: %v", err)
+	}
+	got, err := io.ReadAll(r)
+	if err != nil || string(got) != plaintext {
+		t.Fatalf("identity-based encryption roundtrip failed: %v", err)
 	}
 }

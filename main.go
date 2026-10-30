@@ -4,7 +4,7 @@
 
 // age-plugin-sshagent is an age plugin that derives X25519 identities from
 // deterministic ssh-agent signatures, so files can be decrypted with a key
-// held in (and never leaving) your ssh-agent.
+// derived from an SSH key held in (and never leaving) your ssh-agent.
 //
 // Recipients are native age X25519 recipients (age1...), so the encrypting
 // side needs only stock age — no plugin. Only the identity owner needs this
@@ -58,7 +58,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `Usage:
   age-plugin-sshagent keygen [-k SELECTOR] [-o FILE]
       Derive an identity from an ssh-ed25519 key in your ssh-agent.
-      Prints the identity (safe to store anywhere — it contains no secrets)
+      Prints the identity (public SSH fingerprint and salt; keep a backup)
       and the age1... public key to encrypt to.
 
   age-plugin-sshagent recipient [-i FILE]
@@ -71,5 +71,7 @@ Decryption happens through age itself:
   age -d -i identity.txt file.age
 
 The ssh-agent must be running and hold the key (SSH_AUTH_SOCK).
+Agent signing access plus the identity can permanently expose its decryption key.
+Use a dedicated key in an agent that is not forwarded.
 `)
 }
